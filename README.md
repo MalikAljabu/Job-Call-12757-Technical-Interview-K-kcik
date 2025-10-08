@@ -3,8 +3,8 @@
 ## Job Call 12757 - 2 Cloud System Administrators Junior and/or Senior
 ### Name: Ali Erdem Kökcik
 ### First Interview: 23/09/2025
-### Invitation date: XXXXXXXXX
-### Due Date: XXXXXXXXX
+### Invitation date: 08/10/2025 at 17:00
+### Due Date: 15/10/2025 at 17:00
 ### Exercise: Deployment of a JupyterHub instance
 ### Objective:
 #### Deploy a [JupyterHub](https://jupyter.org/) instance using a [minikube](https://minikube.sigs.k8s.io/docs/) environment (or equivalent). The deployment must have two PersistentVolumeClaims (PVCs) of different sizes: 
