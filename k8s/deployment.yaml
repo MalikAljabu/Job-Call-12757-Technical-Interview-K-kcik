@@ -1,0 +1,181 @@
+#Jupyterhub configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jupyterhub-config
+data:
+  jupyterhub_config.py: |
+    import os
+    import importlib
+
+    c = get_config()
+
+    data_path = "/srv/jupyterhub/input-data"
+    notebooks_path = "/srv/jupyterhub/notebooks"
+
+    c.JupyterHub.bind_url = "http://:8000"
+    oauth_mod = importlib.import_module("oauthenticator.github")
+    c.JupyterHub.authenticator_class = oauth_mod.GitHubOAuthenticator
+    c.JupyterHub.spawner_class = "simple"
+
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+    callback_url = os.environ.get("OAUTH_CALLBACK_URL")
+
+    if not all([client_id, client_secret, callback_url]):
+        missing = [
+            name
+            for name, value in [
+                ("GITHUB_CLIENT_ID", client_id),
+                ("GITHUB_CLIENT_SECRET", client_secret),
+                ("OAUTH_CALLBACK_URL", callback_url),
+            ]
+            if not value
+        ]
+        raise ValueError(
+            "Missing GitHub OAuth configuration env vars: {}".format(
+                ", ".join(missing)
+            )
+        )
+
+    c.GitHubOAuthenticator.client_id = client_id
+    c.GitHubOAuthenticator.client_secret = client_secret
+    c.GitHubOAuthenticator.oauth_callback_url = callback_url
+    c.GitHubOAuthenticator.scope = ["read:user"]
+
+    allowed_csv = os.environ.get("JUPYTERHUB_ALLOWED_LOGINS", "")
+    allowed_users = {u.strip() for u in allowed_csv.split(",") if u.strip()}
+    if allowed_users:
+        c.Authenticator.allowed_users = allowed_users
+        c.Authenticator.allow_all = False
+    else:
+        c.Authenticator.allow_all = True
+
+    admin_csv = os.environ.get("JUPYTERHUB_ADMIN_LOGINS", "")
+    admin_users = {u.strip() for u in admin_csv.split(",") if u.strip()}
+    if admin_users:
+        c.Authenticator.admin_users = admin_users
+
+    c.JupyterHub.cookie_secret_file = "/tmp/jupyterhub_cookie_secret"
+    c.JupyterHub.db_url = "sqlite:////tmp/jupyterhub.sqlite"
+    c.JupyterHub.pid_file = "/tmp/jupyterhub.pid"
+    c.ConfigurableHTTPProxy.pid_file = "/tmp/jupyterhub-proxy.pid"
+
+    # Launch JupyterLab when users log in.
+    c.Spawner.default_url = "/lab"
+
+    # Ensure each user gets their own notebook directory inside the shared PVC.
+    base_args = ["--ServerApp.allow_root=True"]
+
+    def create_user_dir(spawner):
+        username = spawner.user.name
+        user_dir = os.path.join(notebooks_path, username)
+        os.makedirs(user_dir, exist_ok=True)
+        extra_args = list(spawner.args or [])
+        extra_args = [
+            arg
+            for arg in extra_args
+            if not arg.startswith("--ServerApp.root_dir")
+            and not arg.startswith("--ServerApp.default_url")
+        ]
+        extra_args = base_args + [
+            arg
+            for arg in extra_args
+            if not arg.startswith("--ServerApp.allow_root")
+        ]
+        extra_args.extend(
+            [
+                f"--ServerApp.root_dir={user_dir}",
+                "--ServerApp.default_url=/lab",
+            ]
+        )
+        spawner.args = extra_args
+        env = dict(spawner.environment or {})
+        env.update(
+            {
+                "JUPYTERHUB_NOTEBOOK_DIR": user_dir,
+                "JUPYTERHUB_INPUT_DATA": data_path,
+            }
+        )
+        spawner.environment = env
+
+    c.Spawner.args = list(base_args)
+    c.Spawner.pre_spawn_hook = create_user_dir
+
+    c.Spawner.environment = {
+        "JUPYTERHUB_INPUT_DATA": data_path,
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jupyterhub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jupyterhub
+  template:
+    metadata:
+      labels:
+        app: jupyterhub
+    spec:
+      containers:
+        - name: hub
+          image: quay.io/jupyterhub/jupyterhub:4.0.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - jupyterhub
+            - --config
+            - /etc/jupyterhub/jupyterhub_config.py
+          ports:
+            - containerPort: 8000
+          env:
+            - name: JUPYTERHUB_CRYPT_KEY
+              value: insecure-development-key
+            - name: OAUTH_CALLBACK_URL
+              value: http://jupyterhub.local/hub/oauth_callback
+            - name: JUPYTERHUB_ALLOWED_LOGINS
+              value: ""
+            - name: JUPYTERHUB_ADMIN_LOGINS
+              value: ""
+          envFrom:
+            - secretRef:
+                name: jupyterhub-oauth
+          command:
+            - /bin/sh
+            - -c
+            - >
+              python3 -m pip show jupyterlab >/dev/null 2>&1 ||
+              python3 -m pip install --no-cache-dir --quiet jupyterlab notebook oauthenticator;
+              exec jupyterhub --config /etc/jupyterhub/jupyterhub_config.py
+          volumeMounts:
+            - name: config
+              mountPath: /etc/jupyterhub
+            - name: data
+              mountPath: /srv/jupyterhub/input-data
+              readOnly: true
+            - name: notebooks
+              mountPath: /srv/jupyterhub/notebooks
+          readinessProbe:
+            httpGet:
+              path: /hub/health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /hub/health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: jupyterhub-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: jupyterhub-data
+        - name: notebooks
+          persistentVolumeClaim:
+            claimName: jupyterhub-notebooks
